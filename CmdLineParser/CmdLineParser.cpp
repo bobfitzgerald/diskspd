@@ -209,6 +209,10 @@ void CmdLineParser::_DisplayUsageInfo(const char *pszFilename) const
     printf("                        absence of this switch indicates 100%% reads\n");
     printf("                          IMPORTANT: a write test will destroy existing data without a warning\n");
     printf("  -W<seconds>           warm up time - duration of the test before measurements start [default=5s]\n");
+    printf("  -Wxfer[R|W|T]<size>[K|M|G|b]\n"
+           "                        warm up transfer - how much data to transfer before measurements start [default=none]\n");
+    printf("  -Wiops[R|W|T]<count>[K|M|G|b]\n"
+        "                           warm up IOPS - how many IOs to execute before measurements start [default=none]\n");
     printf("  -x                    use completion routines instead of I/O Completion Ports\n");
     printf("  -X<filepath>          use an XML file for configuring the workload. Cannot be used with other parameters.\n");
     printf("  -z[seed]              set random seed [with no -z, seed=0; with plain -z, seed is based on system run time]\n");
@@ -630,7 +634,7 @@ bool CmdLineParser::_ReadParametersFromCmdLine(const int argc, const char *argv[
         case 'd':    //duration
             {
                 int x = atoi(arg + 1);
-                if (x > 0)
+                if (x >= 0)
                 {
                     timeSpan.SetDuration(x);
                 }
@@ -1104,14 +1108,59 @@ bool CmdLineParser::_ReadParametersFromCmdLine(const int argc, const char *argv[
 
         case 'W':    //warm up time
             {
-                int c = atoi(arg + 1);
-                if (c >= 0)
-                {
-                    timeSpan.SetWarmup(c);
+
+#define elseifWarm(strname, setfnname, linenum) \
+                else if (0 == _strnicmp(pszArg, strname, 5)) \
+                { \
+                    const char* pszArg1 = pszArg + 5; \
+                    UINT64 ullValue; \
+                    if (_GetSizeInBytes(pszArg1, ullValue)) \
+                    { \
+                        const INT64 llValue = ullValue; \
+                        if (0 < llValue) \
+                        { \
+                            if (RPFVERBOSE) fprintf(stderr, "Warmup spec %d: %I64d '%s' '%s'.\n", linenum, llValue, pszArg - 2, pszArg1); \
+                            timeSpan.setfnname(llValue); \
+                        } \
+                        else \
+                        { \
+                            if (RPFVERBOSE) fprintf(stderr, "Negative warmup spec %d: '%s' '%s' 0x%08I64x.\n", linenum, pszArg - 2, pszArg1, llValue); \
+                            fError = true; \
+                        } \
+                    } \
+                    else \
+                    { \
+                        if (RPFVERBOSE) fprintf(stderr, "Invalid warmup spec %d: '%s' '%s'.\n", linenum, pszArg - 2, pszArg1); \
+                        fError = true; \
+                    } \
                 }
+
+                const char* pszArg = arg + 1;
+                if (RPFVERBOSE) fprintf(stderr, "Warmup spec %d: '%s'.\n", __LINE__, pszArg-2);
+                if (0 == *pszArg)
+                {
+                    if (RPFVERBOSE) fprintf(stderr, "Invalid warmup spec %d: '%s'.\n", __LINE__, pszArg-2);
+                    fError = true;
+                }
+                elseifWarm("xferT", SetWarmTotalBytesXferred, __LINE__)
+                elseifWarm("xferR", SetWarmReadBytesXferred, __LINE__)
+                elseifWarm("xferW", SetWarmWriteBytesXferred, __LINE__)
+                elseifWarm("iopsT", SetWarmTotalIOs, __LINE__)
+                elseifWarm("iopsR", SetWarmReadIOs, __LINE__)
+                elseifWarm("iopsW", SetWarmWriteIOs, __LINE__)
                 else
                 {
-                    fError = true;
+                    int c = atoi(pszArg);
+                    if (c >= 0)
+                    {
+                        timeSpan.SetWarmup(c);
+                        if (RPFVERBOSE) fprintf(stderr, "Warmup spec %d: %d '%s'.\n", __LINE__, c, pszArg-2);
+                    }
+                    else
+                    {
+                        if (RPFVERBOSE) fprintf(stderr, "Invalid warmup spec %d: '%s'.\n", __LINE__, pszArg-2);
+                        fError = true;
+                    }
                 }
             }
             break;

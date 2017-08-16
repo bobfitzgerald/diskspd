@@ -786,6 +786,7 @@ string ResultParser::ParseResults(Profile& profile, const SystemInformation& sys
         const TimeSpan& timeSpan = profile.GetTimeSpans()[iResult];
 
         size_t ulProcCount = results.vSystemProcessorPerfInfo.size();
+        double fWarmTime = PerfTimer::PerfTimeToSeconds(results.ullWarmTimeCount); //warmup duration
         double fTime = PerfTimer::PerfTimeToSeconds(results.ullTimeCount); //test duration
 
         char szFloatBuffer[1024];
@@ -794,18 +795,43 @@ string ResultParser::ParseResults(Profile& profile, const SystemInformation& sys
         // In the latter case vThreadResults.size() == number of threads per file * file count
         size_t ulThreadCnt = (timeSpan.GetThreadCount() > 0) ? timeSpan.GetThreadCount() : results.vThreadResults.size();
 
-        if (fTime < 0.0000001)
+#define printWarm(pasted, tabs) \
+            { \
+                _Print("Warm" #pasted ":%s%I64d\n", tabs, results.ullWarm##pasted); \
+            }
+
+        _Print("\n");
+        _Print("RPFVERBOSE:\t\t%u\n", RPFVERBOSE);
+        _Print("RPF_INTERLOCK_WARM_THREADPARAMETERS:\t\t%u\n", RPF_INTERLOCK_WARM_THREADPARAMETERS);
+        sprintf_s(szFloatBuffer, sizeof(szFloatBuffer), "actual warmup time:\t%.2lfs\n", fWarmTime);
+        _Print("%s", szFloatBuffer);
+        if (0 != ( timeSpan.GetWarmTotalBytesXferred()
+                 | timeSpan.GetWarmReadBytesXferred()
+                 | timeSpan.GetWarmWriteBytesXferred()
+                 | timeSpan.GetWarmTotalIOs()
+                 | timeSpan.GetWarmReadIOs()
+                 | timeSpan.GetWarmWriteIOs() ))
+        {
+            printWarm(TotalBytesXferred, "\t");
+            printWarm(ReadBytesXferred, "\t");
+            printWarm(WriteBytesXferred, "\t");
+            printWarm(TotalIOs, "\t\t");
+            printWarm(ReadIOs, "\t\t");
+            printWarm(WriteIOs, "\t\t");
+        }
+
+        _Print("\n");
+        sprintf_s(szFloatBuffer, sizeof(szFloatBuffer), "actual test time:\t%.2lfs\n", fTime);
+        _Print("%s", szFloatBuffer);
+        _Print("thread count:\t\t%u\n", ulThreadCnt);
+
+        if ( (fTime < 0.0000001) || (0 == timeSpan.GetDuration()) )
         {
             _Print("The test was interrupted before the measurements began. No results are displayed.\n");
         }
         else
         {
             // TODO: parameters.bCreateFile;
-
-            _Print("\n");
-            sprintf_s(szFloatBuffer, sizeof(szFloatBuffer), "actual test time:\t%.2lfs\n", fTime);
-            _Print("%s", szFloatBuffer);
-            _Print("thread count:\t\t%u\n", ulThreadCnt);
 
             _Print("proc count:\t\t%u\n", ulProcCount);
             _PrintCpuUtilization(results);

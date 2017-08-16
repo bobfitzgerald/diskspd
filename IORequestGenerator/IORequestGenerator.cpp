@@ -297,7 +297,38 @@ struct ETWEventCounters g_EtwEventCounters;
 __declspec(align(4)) static LONG volatile g_lRunningThreadsCount = 0;   //must be aligned on a 32-bit boundary, otherwise InterlockedIncrement
                                                                         //and InterlockedDecrement will fail on 64-bit systems
 
-static BOOL volatile g_bRun;                    //used for letting threads know that they should stop working
+//static BOOL volatile g_bRun;                    //used for letting threads know that they should stop working
+
+const ULONG bitWarmTotalBytesXferred = 0x01;
+const ULONG bitWarmReadBytesXferred  = 0x02;
+const ULONG bitWarmWriteBytesXferred = 0x04;
+const ULONG bitWarmTotalIOs          = 0x10;
+const ULONG bitWarmReadIOs           = 0x20;
+const ULONG bitWarmWriteIOs          = 0x40;
+
+__declspec(align(64)) 
+struct CacheAlignedFlags {
+    HANDLE hStopEvent;
+    ULONG volatile bvWarmingValidBits;
+    BOOL volatile bWarmingExitSignalled;
+    BOOL volatile bRun;                    //used for letting threads know that they should stop working
+};
+
+__declspec(align(64))
+struct CacheAlignedWarm {
+    UINT64 volatile ullWarmTotalBytesXferred;
+    UINT64 volatile ullWarmReadBytesXferred;
+    UINT64 volatile ullWarmWriteBytesXferred;
+    UINT64 volatile ullWarmTotalIOs;
+    UINT64 volatile ullWarmReadIOs;
+    UINT64 volatile ullWarmWriteIOs;
+};
+
+static struct {
+    CacheAlignedFlags flags; // static initial values?
+    CacheAlignedWarm  goals;
+    CacheAlignedWarm  dones;
+} g_cacheAligned;
 
 typedef NTSTATUS (__stdcall *NtQuerySysInfo)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
 static NtQuerySysInfo g_pfnNtQuerySysInfo;
@@ -603,6 +634,138 @@ __inline static IOOperation DecideIo(UINT32 ulWriteRatio)
     return (((UINT32)abs(rand() % 100 + 1)) > ulWriteRatio) ? IOOperation::ReadIO : IOOperation::WriteIO;
  }
 
+__inline void UpdateWarmingProgress(ThreadParameters *p, IOOperation ioop, DWORD dwBytesTransferred)
+{
+    UINT64 ullWarmStackTotalBytesXferred;
+    UINT64 ullWarmStackReadBytesXferred;
+    UINT64 ullWarmStackWriteBytesXferred;
+    UINT64 ullWarmStackTotalIOs;
+    UINT64 ullWarmStackReadIOs;
+    UINT64 ullWarmStackWriteIOs;
+    bool doSignal = false;
+
+    assert(dwBytesTransferred > 0);
+
+    //
+    //  Update the thread local aggregator
+    //
+
+#if RPF_INTERLOCK_WARM_THREADPARAMETERS
+    ullWarmStackTotalBytesXferred = ::InterlockedAdd64((volatile LONG64 *)&p->ullWarmThdParmTotalBytesXferred, dwBytesTransferred);
+    ullWarmStackTotalIOs = ::InterlockedIncrement64((volatile LONG64 *)&p->ullWarmThdParmTotalIOs);
+    if (ioop == IOOperation::ReadIO)
+    {
+        ullWarmStackReadBytesXferred = ::InterlockedAdd64((volatile LONG64 *)&p->ullWarmThdParmReadBytesXferred, dwBytesTransferred);
+        ullWarmStackReadIOs = ::InterlockedIncrement64((volatile LONG64 *)&p->ullWarmThdParmReadIOs);
+    }
+    else
+    {
+        ullWarmStackWriteBytesXferred = ::InterlockedAdd64((volatile LONG64 *)&p->ullWarmThdParmWriteBytesXferred, dwBytesTransferred);
+        ullWarmStackWriteIOs = ::InterlockedIncrement64((volatile LONG64 *)&p->ullWarmThdParmWriteIOs);
+    }
+#else  // RPF_INTERLOCK_WARM_THREADPARAMETERS
+    ullWarmStackTotalBytesXferred = (p->ullWarmThdParmTotalBytesXferred += dwBytesTransferred);
+    ullWarmStackTotalIOs = ++p->ullWarmThdParmTotalIOs;
+    if (ioop == IOOperation::ReadIO)
+    {
+        ullWarmStackReadBytesXferred = (p->ullWarmThdParmReadBytesXferred += dwBytesTransferred);
+        ullWarmStackReadIOs = ++p->ullWarmThdParmReadIOs;
+    }
+    else
+    {
+        ullWarmStackWriteBytesXferred = (p->ullWarmThdParmWriteBytesXferred += dwBytesTransferred);
+        ullWarmStackWriteIOs = ++p->ullWarmThdParmWriteIOs;
+    }
+#endif // RPF_INTERLOCK_WARM_THREADPARAMETERS
+
+    if (ullWarmStackTotalIOs < 100) return;
+
+    if (ioop == IOOperation::ReadIO)
+    {
+        ullWarmStackWriteBytesXferred = p->ullWarmThdParmWriteBytesXferred;
+        ullWarmStackWriteIOs = p->ullWarmThdParmWriteIOs;
+    }
+    else
+    {
+        ullWarmStackReadBytesXferred = p->ullWarmThdParmReadBytesXferred, dwBytesTransferred;
+        ullWarmStackReadIOs = p->ullWarmThdParmReadIOs;
+    }
+
+    //
+    //  drain the local aggregator into global
+    //
+
+#if RPF_INTERLOCK_WARM_THREADPARAMETERS
+
+#define ifWarmUpdateGlobal(pasted) \
+        { \
+            const UINT64 val = ullWarmStack##pasted; \
+            if (0 != val) \
+            { \
+                ::InterlockedAdd64((volatile LONG64 *)&p->ullWarmThdParm##pasted, -(LONG64)val); \
+                UINT64 after = ::InterlockedAdd64((volatile LONG64 *)&g_cacheAligned.dones.ullWarm##pasted, val); \
+                if (g_cacheAligned.flags.bvWarmingValidBits & bitWarm##pasted) \
+                { \
+                    if (g_cacheAligned.goals.ullWarm##pasted <= after) \
+                    { \
+                        if (RPFVERBOSE) fprintf(stderr, "Signal warming complete ullWarm" #pasted " 0x%I64x %I64d %I64d\n", after, after, val); \
+                        doSignal = true; \
+                    } \
+                } \
+            } \
+        }
+
+    ifWarmUpdateGlobal(TotalBytesXferred);
+    ifWarmUpdateGlobal(ReadBytesXferred);
+    ifWarmUpdateGlobal(WriteBytesXferred);
+    ifWarmUpdateGlobal(TotalIOs);
+    ifWarmUpdateGlobal(ReadIOs);
+    ifWarmUpdateGlobal(WriteIOs);
+#undef ifWarmUpdateGlobal
+
+#else  // RPF_INTERLOCK_WARM_THREADPARAMETERS
+
+#define ifWarmUpdateGlobal(pasted) \
+        { \
+            const INT64 val = ullWarmStack##pasted; \
+            if (0 != val) \
+            { \
+                UINT64 after = (g_cacheAligned.dones.ullWarm##pasted += p->ullWarmThdParm##pasted); \
+                p->ullWarmThdParm##pasted = 0; \
+                if (g_cacheAligned.flags.bvWarmingValidBits & bitWarm##pasted) \
+                { \
+                    if (g_cacheAligned.goals.ullWarm##pasted <= after) \
+                    { \
+                        if (RPFVERBOSE) fprintf(stderr, "Signal warming complete ullWarm" #pasted " 0x%I64x %I64d %I64d\n", after, after, val); \
+                        doSignal = true; \
+                    } \
+                } \
+            } \
+        }
+
+    ifWarmUpdateGlobal(TotalBytesXferred);
+    ifWarmUpdateGlobal(ReadBytesXferred);
+    ifWarmUpdateGlobal(WriteBytesXferred);
+    ifWarmUpdateGlobal(TotalIOs);
+    ifWarmUpdateGlobal(ReadIOs);
+    ifWarmUpdateGlobal(WriteIOs);
+#undef ifWarmUpdateGlobal
+
+#endif // RPF_INTERLOCK_WARM_THREADPARAMETERS
+
+    if (doSignal)
+    {
+        assert(NULL != g_cacheAligned.flags.hStopEvent);
+        g_cacheAligned.flags.bvWarmingValidBits = 0;
+        g_cacheAligned.flags.bWarmingExitSignalled = TRUE;
+        BOOL ok = ::SetEvent(g_cacheAligned.flags.hStopEvent);
+        if (!ok)
+        {
+            PrintError("ERROR: Failed to SetEvent() (error code: %u)\n", GetLastError());
+        }
+    }
+}
+
 /*****************************************************************************/
 // function called from worker thread
 // performs asynch I/O using IO Completion Ports
@@ -658,7 +821,7 @@ __inline static bool doWorkUsingIOCompletionPorts(ThreadParameters *p, HANDLE hC
     //
     // perform work
     //
-    while(g_bRun && !g_bThreadError)
+    while(g_cacheAligned.flags.bRun && !g_bThreadError)
     {
         DWORD dwMinSleepTime = ~((DWORD)0);
         for (size_t i = 0; i < overlappedQueue.GetCount(); i++)
@@ -741,6 +904,15 @@ __inline static bool doWorkUsingIOCompletionPorts(ThreadParameters *p, HANDLE hC
                     p->pullStartTime,
                     fMeasureLatency,
                     p->pTimeSpan->GetCalculateIopsStdDev());
+            }
+
+            if (0 != g_cacheAligned.flags.bvWarmingValidBits)
+            {
+                //
+                //  BRANCH PREDICT THIS PATH NOT TAKEN
+                //
+
+                UpdateWarmingProgress(p, p->vdwIoType[iOverlapped], dwBytesTransferred);
             }
 
             // TODO: move to a separate function
@@ -844,6 +1016,15 @@ VOID CALLBACK fileIOCompletionRoutine(DWORD dwErrorCode, DWORD dwBytesTransferre
             p->pTimeSpan->GetCalculateIopsStdDev());
     }
 
+    if (0 != g_cacheAligned.flags.bvWarmingValidBits)
+    {
+        //
+        //  BRANCH PREDICT THIS PATH NOT TAKEN
+        //
+
+        UpdateWarmingProgress(p, p->vdwIoType[iOverlapped], dwBytesTransferred);
+    }
+
     //restart the I/O operation that just completed
     li.HighPart = pOverlapped->OffsetHigh;
     li.LowPart = pOverlapped->Offset;
@@ -860,7 +1041,7 @@ VOID CALLBACK fileIOCompletionRoutine(DWORD dwErrorCode, DWORD dwBytesTransferre
         li.QuadPart / pTarget->GetBlockSizeInBytes());
 
     // start a new IO operation
-    if (g_bRun && !g_bThreadError)
+    if (g_cacheAligned.flags.bRun && !g_bThreadError)
     {
         size_t iRequest = iOverlapped - p->vFirstOverlappedIdForTargetId[iTarget];
         if (fMeasureLatency)
@@ -937,11 +1118,11 @@ __inline static bool doWorkUsingCompletionRoutines(ThreadParameters *p)
     }
 
     DWORD dwWaitResult = 0;
-    while( g_bRun && !g_bThreadError )
+    while( g_cacheAligned.flags.bRun && !g_bThreadError )
     {
         dwWaitResult = WaitForSingleObjectEx(p->hEndEvent, INFINITE, TRUE);
 
-        assert(WAIT_IO_COMPLETION == dwWaitResult || (WAIT_OBJECT_0 == dwWaitResult && (!g_bRun || g_bThreadError)));
+        assert(WAIT_IO_COMPLETION == dwWaitResult || (WAIT_OBJECT_0 == dwWaitResult && (!g_cacheAligned.flags.bRun || g_bThreadError)));
 
         //check WaitForSingleObjectEx status
         if( WAIT_IO_COMPLETION != dwWaitResult && WAIT_OBJECT_0 != dwWaitResult )
@@ -1303,7 +1484,7 @@ DWORD WINAPI threadFunc(LPVOID cookie)
         }
         throughputMeter.Start(pTarget->GetThroughputInBytesPerMillisecond(), pTarget->GetBlockSizeInBytes(), pTarget->GetThinkTime(), dwBurstSize);
 
-        while(g_bRun && !g_bThreadError)
+        while(g_cacheAligned.flags.bRun && !g_bThreadError)
         {
             if (throughputMeter.IsRunning())
             {
@@ -1832,7 +2013,10 @@ bool IORequestGenerator::_StopETW(bool fUseETW, TRACEHANDLE hTraceSession) const
 void IORequestGenerator::_InitializeGlobalParameters()
 {
     g_lRunningThreadsCount = 0;     //number of currently running worker threads
-    g_bRun = TRUE;                  //used for letting threads know that they should stop working
+    g_cacheAligned.flags.hStopEvent = NULL;
+    g_cacheAligned.flags.bvWarmingValidBits = 0;                     // no fancy warming yet
+    g_cacheAligned.flags.bWarmingExitSignalled = FALSE;
+    g_cacheAligned.flags.bRun = TRUE;                  //used for letting threads know that they should stop working
 
     g_bThreadError = FALSE;         //true means that an error has occured in one of the threads
     g_bTracing = FALSE;             //true means that ETW is turned on
@@ -1907,6 +2091,11 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
 
     //initialize all global parameters (in case of second run, after the first one is finished)
     _InitializeGlobalParameters();
+    if ( (NULL != pSynch) && (NULL != pSynch->hStopEvent) )
+    {
+        g_cacheAligned.flags.hStopEvent = pSynch->hStopEvent;
+    }
+    if (RPFVERBOSE) fprintf(stderr, "g_cacheAligned.flags.hStopEvent = 0x%I64x line %d\n", (INT64)g_cacheAligned.flags.hStopEvent, __LINE__);
 
     HANDLE hStartEvent = nullptr;                       // start event (used to inform the worker threads that they should start the work)
     HANDLE hEndEvent = nullptr;                         // end event (used only in case of completin routines (not for IO Completion Ports))
@@ -1927,7 +2116,7 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
 
     //FUTURE EXTENSION: check for conflicts in alignment (when cache is turned off only sector aligned I/O are permitted)
     //FUTURE EXTENSION: check if file sizes are enough to have at least first requests not wrapping around
-    
+
     vector<Target> vTargets = timeSpan.GetTargets();
     // allocate memory for random data write buffers
     for (auto i = vTargets.begin(); i != vTargets.end(); i++)
@@ -2012,7 +2201,7 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
     // create the threads
     //
 
-    g_bRun = TRUE;
+    g_cacheAligned.flags.bRun = TRUE;
 
     // gather affinity information, and move to the first active processor
     const auto& vAffinity = timeSpan.GetAffinityAssignments();
@@ -2021,6 +2210,8 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
     g_SystemInformation.processorTopology.GetActiveGroupProcessor(wGroupCtr, bProcCtr, false);
 
     volatile bool fAccountingOn = false;
+    UINT64 ullWarmStartTime;    //warm start time
+    UINT64 ullWarmTimeDiff;  //elapsed warm time (in units returned by QueryPerformanceCounter)
     UINT64 ullStartTime;    //start time
     UINT64 ullTimeDiff;  //elapsed test time (in units returned by QueryPerformanceCounter)
     vector<UINT64> vullSharedSequentialOffsets(vTargets.size(), 0);
@@ -2055,8 +2246,8 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
             size_t cBaseThread = 0;
             auto psi = vullSharedSequentialOffsets.begin();
             for (auto i = vTargets.begin();
-                 i != vTargets.end();
-                 i++, psi++)
+                i != vTargets.end();
+                i++, psi++)
             {
                 // per-file thread mode: groups of threads operate on individual files
                 // and receive the specific seq index for their file (note: singular).
@@ -2115,6 +2306,13 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
             cookie->bProcNum = vAffinity[i].bProc;
         }
 
+        cookie->ullWarmThdParmTotalBytesXferred = 0;
+        cookie->ullWarmThdParmReadBytesXferred = 0;
+        cookie->ullWarmThdParmWriteBytesXferred = 0;
+        cookie->ullWarmThdParmTotalIOs = 0;
+        cookie->ullWarmThdParmReadIOs = 0;
+        cookie->ullWarmThdParmWriteIOs = 0;
+
         //create thread
         cookie->pResults = &results.vThreadResults[iThread];
 
@@ -2160,6 +2358,29 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
     BOOL bBreak = FALSE;
     PEVENT_TRACE_PROPERTIES pETWSession = NULL;
 
+    g_cacheAligned.flags.bvWarmingValidBits = 0;                     // no fancy warming yet
+    g_cacheAligned.flags.bWarmingExitSignalled = FALSE;
+
+#define setWarmingValidBitsIf(pasted) \
+    { \
+        const UINT64 ullValue = timeSpan.GetWarm##pasted(); \
+        if (0 != ullValue) \
+        { \
+            g_cacheAligned.flags.bvWarmingValidBits |= bitWarm##pasted; \
+            g_cacheAligned.goals.ullWarm##pasted = ullValue; \
+            if (RPFVERBOSE) fprintf(stderr, "Warm ullWarm" #pasted " %I64d\n", ullValue); \
+            assert(ullValue > 0); \
+        } \
+        g_cacheAligned.dones.ullWarm##pasted = 0; \
+    }
+
+    setWarmingValidBitsIf(TotalBytesXferred);
+    setWarmingValidBitsIf(ReadBytesXferred);
+    setWarmingValidBitsIf(WriteBytesXferred);
+    setWarmingValidBitsIf(TotalIOs);
+    setWarmingValidBitsIf(ReadIOs);
+    setWarmingValidBitsIf(WriteIOs);
+
     printfv(profile.GetVerbose(), "starting warm up...\n");
     //
     // send start signal
@@ -2175,24 +2396,51 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
     //
     // wait specified amount of time in each phase (warm up, test, cool down)
     //
-    if (timeSpan.GetWarmup() > 0)
+    ullWarmTimeDiff = 0; // mark that no warmup was run
+    if ( (timeSpan.GetWarmup() > 0) || (0 != g_cacheAligned.flags.bvWarmingValidBits) )
     {
+        ullWarmStartTime = PerfTimer::GetTime();
+
         if (bSynchStop)
         {
             assert(NULL != pSynch->hStopEvent);
-            dwWaitStatus = WaitForSingleObject(pSynch->hStopEvent, 1000 * timeSpan.GetWarmup());
+            if (RPFVERBOSE) fprintf(stderr, "enter warming %x line %d\n", g_cacheAligned.flags.bvWarmingValidBits, __LINE__);
+            DWORD milliseconds = 1000 * timeSpan.GetWarmup();
+            if ( (0 == milliseconds) && (0 != g_cacheAligned.flags.bvWarmingValidBits) )
+            {
+                milliseconds = INFINITE;
+            }
+            dwWaitStatus = WaitForSingleObject(pSynch->hStopEvent, milliseconds);
+            if (RPFVERBOSE) fprintf(stderr, "leave warming %x line %d\n", g_cacheAligned.flags.bvWarmingValidBits, __LINE__);
+            g_cacheAligned.flags.bvWarmingValidBits = 0;
             if (WAIT_OBJECT_0 != dwWaitStatus && WAIT_TIMEOUT != dwWaitStatus)
             {
                 PrintError("Error during WaitForSingleObject\n");
                 _TerminateWorkerThreads(vhThreads);
                 return false;
             }
-            bBreak = (WAIT_TIMEOUT != dwWaitStatus);
+            if (g_cacheAligned.flags.bWarmingExitSignalled)
+            {
+                BOOL ok = ::ResetEvent(pSynch->hStopEvent);
+                if (!ok)
+                {
+                    PrintError("ERROR: Failed to ResetEvent() (error code: %u)\n", GetLastError());
+                }
+            }
+            else
+            {
+                bBreak = (WAIT_TIMEOUT != dwWaitStatus);
+            }
+            if (RPFVERBOSE) fprintf(stderr, "bBreak %d signalled %d line %d\n", bBreak, g_cacheAligned.flags.bWarmingExitSignalled, __LINE__);
         }
         else
         {
+            assert(0 == g_cacheAligned.flags.bvWarmingValidBits);  // BOBFITZ enforce "flags implies bSynchStop" earlier
             Sleep(1000 * timeSpan.GetWarmup());
         }
+
+        //get cycle count and perf counters
+        ullWarmTimeDiff = PerfTimer::GetTime() - ullWarmStartTime;
     }
 
     if (!bBreak) // proceed only if user didn't break the test
@@ -2254,23 +2502,26 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
         fAccountingOn = true;
 #pragma warning( pop )
 
-        assert(timeSpan.GetDuration() > 0);
-        if (bSynchStop)
+        assert(timeSpan.GetDuration() >= 0);
+        if (timeSpan.GetDuration() > 0)
         {
-            assert(NULL != pSynch->hStopEvent);
-            dwWaitStatus = WaitForSingleObject(pSynch->hStopEvent, 1000 * timeSpan.GetDuration());
-            if (WAIT_OBJECT_0 != dwWaitStatus && WAIT_TIMEOUT != dwWaitStatus)
+            if (bSynchStop)
             {
-                PrintError("Error during WaitForSingleObject\n");
-                _StopETW(fUseETW, hTraceSession);
-                _TerminateWorkerThreads(vhThreads);    //FUTURE EXTENSION: worker threads should have a chance to free allocated memory (see also other places calling terminateWorkerThreads())
-                return FALSE;
+                assert(NULL != pSynch->hStopEvent);
+                dwWaitStatus = WaitForSingleObject(pSynch->hStopEvent, 1000 * timeSpan.GetDuration());
+                if (WAIT_OBJECT_0 != dwWaitStatus && WAIT_TIMEOUT != dwWaitStatus)
+                {
+                    PrintError("Error during WaitForSingleObject\n");
+                    _StopETW(fUseETW, hTraceSession);
+                    _TerminateWorkerThreads(vhThreads);    //FUTURE EXTENSION: worker threads should have a chance to free allocated memory (see also other places calling terminateWorkerThreads())
+                    return FALSE;
+                }
+                bBreak = (WAIT_TIMEOUT != dwWaitStatus);
             }
-            bBreak = (WAIT_TIMEOUT != dwWaitStatus);
-        }
-        else
-        {
-            Sleep(1000 * timeSpan.GetDuration());
+            else
+            {
+                Sleep(1000 * timeSpan.GetDuration());
+            }
         }
 
         fAccountingOn = false;
@@ -2343,7 +2594,7 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
     //
     // signal the threads to finish
     //
-    g_bRun = FALSE;
+    g_cacheAligned.flags.bRun = FALSE;
     if (timeSpan.GetCompletionRoutines())
     {
         if (!SetEvent(hEndEvent))
@@ -2410,8 +2661,22 @@ bool IORequestGenerator::_GenerateRequestsForTimeSpan(const Profile& profile, co
     // process results and pass them to the result parser
     //
 
+#define toResults(pasted) \
+        { \
+            results.ullWarm##pasted = g_cacheAligned.dones.ullWarm##pasted; \
+        }
+
     // get processors perf. info
     results.vSystemProcessorPerfInfo = vPerfDiff;
+
+    results.ullWarmTimeCount = ullWarmTimeDiff;
+    toResults(TotalBytesXferred);
+    toResults(ReadBytesXferred);
+    toResults(WriteBytesXferred);
+    toResults(TotalIOs);
+    toResults(ReadIOs);
+    toResults(WriteIOs);
+
     results.ullTimeCount = ullTimeDiff;
 
     //

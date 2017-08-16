@@ -439,6 +439,72 @@ HRESULT XmlProfileParser::_ParseTimeSpan(IXMLDOMNode *pXmlNode, TimeSpan *pTimeS
 
     if (SUCCEEDED(hr))
     {
+        UINT64 ullValue;
+        hr = _GetUINT64(pXmlNode, "WarmXferTotal", &ullValue);
+        if (SUCCEEDED(hr) && (hr != S_FALSE))
+        {
+            if (RPFVERBOSE) fprintf(stderr, "WarmXferTotal %I64d\n", ullValue);
+            pTimeSpan->SetWarmTotalBytesXferred(ullValue);
+        }
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        UINT64 ullValue;
+        hr = _GetUINT64(pXmlNode, "WarmXferRead", &ullValue);
+        if (SUCCEEDED(hr) && (hr != S_FALSE))
+        {
+            if (RPFVERBOSE) fprintf(stderr, "WarmXferRead %I64d\n", ullValue);
+            pTimeSpan->SetWarmReadBytesXferred(ullValue);
+        }
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        UINT64 ullValue;
+        hr = _GetUINT64(pXmlNode, "WarmXferWrite", &ullValue);
+        if (SUCCEEDED(hr) && (hr != S_FALSE))
+        {
+            if (RPFVERBOSE) fprintf(stderr, "WarmXferWrite %I64d\n", ullValue);
+            pTimeSpan->SetWarmWriteBytesXferred(ullValue);
+        }
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        UINT64 ullValue;
+        hr = _GetUINT64(pXmlNode, "WarmIOsTotal", &ullValue);
+        if (SUCCEEDED(hr) && (hr != S_FALSE))
+        {
+            if (RPFVERBOSE) fprintf(stderr, "WarmIOsTotal %I64d\n", ullValue);
+            pTimeSpan->SetWarmTotalIOs(ullValue);
+        }
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        UINT64 ullValue;
+        hr = _GetUINT64(pXmlNode, "WarmIOsRead", &ullValue);
+        if (SUCCEEDED(hr) && (hr != S_FALSE))
+        {
+            if (RPFVERBOSE) fprintf(stderr, "WarmIOsRead %I64d\n", ullValue);
+            pTimeSpan->SetWarmReadIOs(ullValue);
+        }
+    }
+
+    if (SUCCEEDED(hr))
+    {
+        UINT64 ullValue;
+        hr = _GetUINT64(pXmlNode, "WarmIOsWrite", &ullValue);
+        if (SUCCEEDED(hr) && (hr != S_FALSE))
+        {
+            if (RPFVERBOSE) fprintf(stderr, "WarmIOsWrite %I64d\n", ullValue);
+            pTimeSpan->SetWarmWriteIOs(ullValue);
+        }
+    }
+
+    if (SUCCEEDED(hr))
+    {
         UINT32 ulCooldown;
         hr = _GetUINT32(pXmlNode, "Cooldown", &ulCooldown);
         if (SUCCEEDED(hr) && (hr != S_FALSE))

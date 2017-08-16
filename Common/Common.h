@@ -37,6 +37,9 @@ SOFTWARE.
 #include "Histogram.h"
 #include "IoBucketizer.h"
 
+#define RPFVERBOSE 1
+#define RPF_INTERLOCK_WARM_THREADPARAMETERS 0
+
 using namespace std;
 
 // versioning material. for simplicity in consumption, please ensure that the date string
@@ -286,6 +289,13 @@ public:
     struct ETWMask EtwMask;
     struct ETWSessionInfo EtwSessionInfo;
     vector<ThreadResults> vThreadResults;
+    UINT64 ullWarmTimeCount;
+    UINT64 ullWarmTotalBytesXferred;
+    UINT64 ullWarmReadBytesXferred;
+    UINT64 ullWarmWriteBytesXferred;
+    UINT64 ullWarmTotalIOs;
+    UINT64 ullWarmReadIOs;
+    UINT64 ullWarmWriteIOs;
     UINT64 ullTimeCount;
     vector<SYSTEM_PROCESSOR_PERFORMANCE_INFORMATION> vSystemProcessorPerfInfo;
 };
@@ -803,6 +813,12 @@ class TimeSpan
 {
 public:
     TimeSpan() :
+        _ullWarmTotalBytesXferred(0),
+        _ullWarmReadBytesXferred(0),
+        _ullWarmWriteBytesXferred(0),
+        _ullWarmTotalIOs(0),
+        _ullWarmReadIOs(0),
+        _ullWarmWriteIOs(0),
         _ulDuration(10),
         _ulWarmUp(5),
         _ulCoolDown(0),
@@ -831,6 +847,24 @@ public:
         _vTargets.push_back(Target(target));
     }
     vector<Target> GetTargets() const { return _vTargets; }
+
+    void SetWarmTotalBytesXferred(UINT64 ullWarmTotalBytesXferred) { _ullWarmTotalBytesXferred = ullWarmTotalBytesXferred; }
+    INT64 GetWarmTotalBytesXferred() const { return _ullWarmTotalBytesXferred; }
+
+    void SetWarmReadBytesXferred(UINT64 ullWarmReadBytesXferred) { _ullWarmReadBytesXferred = ullWarmReadBytesXferred; }
+    INT64 GetWarmReadBytesXferred() const { return _ullWarmReadBytesXferred; }
+
+    void SetWarmWriteBytesXferred(UINT64 ullWarmWriteBytesXferred) { _ullWarmWriteBytesXferred = ullWarmWriteBytesXferred; }
+    INT64 GetWarmWriteBytesXferred() const { return _ullWarmWriteBytesXferred; }
+
+    void SetWarmTotalIOs(UINT64 ullWarmTotalIOs) { _ullWarmTotalIOs = ullWarmTotalIOs; }
+    INT64 GetWarmTotalIOs() const { return _ullWarmTotalIOs; }
+
+    void SetWarmReadIOs(UINT64 ullWarmReadIOs) { _ullWarmReadIOs = ullWarmReadIOs; }
+    INT64 GetWarmReadIOs() const { return _ullWarmReadIOs; }
+
+    void SetWarmWriteIOs(UINT64 ullWarmWriteIOs) { _ullWarmWriteIOs = ullWarmWriteIOs; }
+    INT64 GetWarmWriteIOs() const { return _ullWarmWriteIOs; }
 
     void SetDuration(UINT32 ulDuration) { _ulDuration = ulDuration; }
     UINT32 GetDuration() const { return _ulDuration; }
@@ -867,6 +901,12 @@ public:
 
 private:
     vector<Target> _vTargets;
+    UINT64 _ullWarmTotalBytesXferred;
+    UINT64 _ullWarmReadBytesXferred;
+    UINT64 _ullWarmWriteBytesXferred;
+    UINT64 _ullWarmTotalIOs;
+    UINT64 _ullWarmReadIOs;
+    UINT64 _ullWarmWriteIOs;
     UINT32 _ulDuration;
     UINT32 _ulWarmUp;
     UINT32 _ulCoolDown;
@@ -1060,6 +1100,13 @@ public:
     // TODO: check how it's used
     HANDLE hEndEvent;        //used only in case of completion routines (not for IO Completion Ports)
     
+    UINT64 ullWarmThdParmTotalBytesXferred;
+    UINT64 ullWarmThdParmReadBytesXferred;
+    UINT64 ullWarmThdParmWriteBytesXferred;
+    UINT64 ullWarmThdParmTotalIOs;
+    UINT64 ullWarmThdParmReadIOs;
+    UINT64 ullWarmThdParmWriteIOs;
+
     bool AllocateAndFillBufferForTarget(const Target& target);
     BYTE* GetReadBuffer(size_t iTarget, size_t iRequest);
     BYTE* GetWriteBuffer(size_t iTarget, size_t iRequest);

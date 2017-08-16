@@ -361,6 +361,24 @@ string TimeSpan::GetXml() const
     sprintf_s(buffer, _countof(buffer), "<Warmup>%u</Warmup>\n", _ulWarmUp);
     sXml += buffer;
 
+    sprintf_s(buffer, _countof(buffer), "<WarmXferTotal>%I64u</WarmXferTotal>\n", _ullWarmTotalBytesXferred);
+    sXml += buffer;
+
+    sprintf_s(buffer, _countof(buffer), "<WarmXferRead>%I64u</WarmXferRead>\n", _ullWarmReadBytesXferred);
+    sXml += buffer;
+
+    sprintf_s(buffer, _countof(buffer), "<WarmXferWrite>%I64u</WarmXferWrite>\n", _ullWarmWriteBytesXferred);
+    sXml += buffer;
+
+    sprintf_s(buffer, _countof(buffer), "<WarmIOsTotal>%I64u</WarmIOsTotal>\n", _ullWarmTotalIOs);
+    sXml += buffer;
+
+    sprintf_s(buffer, _countof(buffer), "<WarmIOsRead>%I64u</WarmIOsRead>\n", _ullWarmReadIOs);
+    sXml += buffer;
+
+    sprintf_s(buffer, _countof(buffer), "<WarmIOsWrite>%I64u</WarmIOsWrite>\n", _ullWarmWriteIOs);
+    sXml += buffer;
+
     sprintf_s(buffer, _countof(buffer), "<Cooldown>%u</Cooldown>\n", _ulCoolDown);
     sXml += buffer;
 
